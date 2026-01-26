@@ -1,0 +1,132 @@
+{
+  "DiagnosticPort": {
+    "ConnectionMode": "Listen",
+    "EndpointName": "dotnet-monitor-pipe"
+  },
+  "DefaultProcess": {
+    "Filters": [{
+      "ProcessName": "fieldservice"
+    }]
+  },
+  "Storage": {
+    "DefaultSharedPath": "C:\\tmp\\dotnet-monitor"
+  },
+  "InProcessFeatures": {
+    "Enabled": true,
+    "CallStacks": {
+      "Enabled": true
+    },
+    "Exceptions": {
+      "Enabled": true
+    }
+  },
+  "Egress": {
+    "FileSystem": {
+      "artifacts": {
+        "directoryPath": "C:\\tmp\\dotnet-monitor\\artifacts",
+        "intermediateDirectoryPath": "C:\\tmp\\dotnet-monitor\\intermediate"
+      }
+    }
+  },
+  "CollectionRules": {
+    "EarlyStarvationWarning": {
+      "Trigger": {
+        "Type": "EventCounter",
+        "Settings": {
+          "ProviderName": "System.Runtime",
+          "CounterName": "threadpool-queue-length",
+          "GreaterThan": 100,
+          "SlidingWindowDuration": "00:00:10"
+        }
+      },
+      "Actions": [
+        {
+          "Type": "CollectStacks",
+          "Settings": {
+            "Egress": "artifacts"
+          }
+        }
+      ],
+      "Limits": {
+        "ActionCount": 3,
+        "ActionCountSlidingWindowDuration": "00:10:00"
+      }
+    },
+    "CriticalStarvation": {
+      "Trigger": {
+        "Type": "EventCounter",
+        "Settings": {
+          "ProviderName": "System.Runtime",
+          "CounterName": "threadpool-queue-length",
+          "GreaterThan": 500,
+          "SlidingWindowDuration": "00:00:15"
+        }
+      },
+      "Actions": [
+        {
+          "Type": "CollectStacks",
+          "Settings": {
+            "Egress": "artifacts"
+          }
+        },
+        {
+          "Type": "CollectDump",
+          "Settings": {
+            "Type": "Full",
+            "Egress": "artifacts"
+          }
+        }
+      ],
+      "Limits": {
+        "ActionCount": 1,
+        "ActionCountSlidingWindowDuration": "01:00:00"
+      }
+    },
+    "TimerBacklogDetection": {
+      "Trigger": {
+        "Type": "EventCounter",
+        "Settings": {
+          "ProviderName": "System.Runtime",
+          "CounterName": "active-timer-count",
+          "GreaterThan": 50,
+          "SlidingWindowDuration": "00:00:10"
+        }
+      },
+      "Actions": [
+        {
+          "Type": "CollectStacks",
+          "Settings": {
+            "Egress": "artifacts"
+          }
+        }
+      ],
+      "Limits": {
+        "ActionCount": 2,
+        "ActionCountSlidingWindowDuration": "00:30:00"
+      }
+    },
+    "ThreadPoolGrowthSpiral": {
+      "Trigger": {
+        "Type": "EventCounter",
+        "Settings": {
+          "ProviderName": "System.Runtime",
+          "CounterName": "threadpool-thread-count",
+          "GreaterThan": 100,
+          "SlidingWindowDuration": "00:00:15"
+        }
+      },
+      "Actions": [
+        {
+          "Type": "CollectStacks",
+          "Settings": {
+            "Egress": "artifacts"
+          }
+        }
+      ],
+      "Limits": {
+        "ActionCount": 2,
+        "ActionCountSlidingWindowDuration": "00:30:00"
+      }
+    }
+  }
+}
