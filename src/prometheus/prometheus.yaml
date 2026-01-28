@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# OTLP receiver is enabled via --web.enable-otlp-receiver flag
+# Metrics will be pushed from OTEL Collector
+
+scrape_configs:
+  # Scrape Prometheus itself for health monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Scrape AkkaApp instances for /metrics endpoint (if exposed)
+  # Note: With OTEL, metrics are pushed, but this is useful for custom metrics
+  - job_name: 'akka-app'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['host.docker.internal:5080', 'host.docker.internal:5081', 'host.docker.internal:5082']
+    metrics_path: /metrics

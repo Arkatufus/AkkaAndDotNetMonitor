@@ -1,4 +1,5 @@
 using Akka.Actor;
+using Akka.Event;
 
 namespace AkkaApp;
 
@@ -17,9 +18,12 @@ public sealed class BlockingOrderActor : ReceiveActor
     public BlockingOrderActor(IActorRef slowService)
     {
         _slowService = slowService;
+        var log = Context.GetLogger();
 
         Receive<ProcessOrder>(msg =>
         {
+            log.Info("Processing order {OrderId}", msg.OrderId);
+            
             // BUG: Blocking the actor's thread with .Result
             // This blocks the ThreadPool thread until the Ask completes
             var validation = _slowService.Ask<ValidationResult>(
@@ -42,6 +46,8 @@ public sealed class BlockingOrderActor : ReceiveActor
             }
 
             Sender.Tell(new OrderResult(msg.OrderId, true, $"Order {msg.OrderId} processed successfully"));
+            
+            log.Info("Order {OrderId} processed successfully", msg.OrderId);
         });
     }
 }

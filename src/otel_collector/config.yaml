@@ -1,0 +1,57 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  # Export traces and logs to Seq
+  otlphttp/seq:
+    endpoint: ${env:SEQ_ENDPOINT}
+    tls:
+      insecure: true
+
+  # Export metrics to Prometheus OTLP receiver
+  otlphttp/prometheus:
+    endpoint: ${env:PROMETHEUS_ENDPOINT}
+    tls:
+      insecure: true
+
+  # Debug output for troubleshooting
+  debug:
+    verbosity: basic
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+
+  # Add resource attributes
+  resource:
+    attributes:
+      - key: service.namespace
+        value: akka-threadpool-demo
+        action: upsert
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [otlphttp/seq, debug]
+
+    logs:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [otlphttp/seq, debug]
+
+    metrics:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [otlphttp/prometheus, debug]
+
+  telemetry:
+    logs:
+      level: info

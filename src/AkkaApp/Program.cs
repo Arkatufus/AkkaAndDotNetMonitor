@@ -1,19 +1,114 @@
 using Akka.Actor;
+using Akka.Cluster;
+using Akka.Cluster.Hosting;
+using Akka.Discovery.Azure;
 using Akka.Hosting;
+using Akka.Management;
+using Akka.Management.Cluster.Bootstrap;
+using Akka.Remote.Hosting;
+using Akka.Routing;
 using AkkaApp;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
+using AkkaApp.Configuration;
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Logs;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
-// Artificially constrain the ThreadPool to simulate starvation on beefy hardware.
-// On a 32-thread machine, the default pool is too large to starve with only 20 actors.
-// In production, this happens naturally on smaller machines or under extreme load.
-ThreadPool.SetMinThreads(4, 4);
-ThreadPool.SetMaxThreads(16, 16);
+// Dynamically constrain the ThreadPool based on processor count.
+// We set max threads to ProcessorCount, then create 2x that many blocking actors.
+// This guarantees starvation on any machine since actors always outnumber threads.
+var maxThreads = Environment.ProcessorCount;
+var blockingActorCount = Environment.ProcessorCount * 2;
+ThreadPool.SetMinThreads(Math.Max(4, maxThreads / 4), Math.Max(4, maxThreads / 4));
+ThreadPool.SetMaxThreads(maxThreads, maxThreads);
 
-var builder = Host.CreateApplicationBuilder(args);
+var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddAkka("OrderSystem", (configurationBuilder, sp) =>
+// Bind Akka configuration
+var akkaOptions = builder.Configuration.GetSection("AkkaOptions").Get<AkkaOptions>() ?? new AkkaOptions();
+
+// Get Azure Tables connection string from Aspire (or use default for local dev)
+var azureTablesConnectionString = builder.Configuration.GetConnectionString("azure-tables")
+    ?? "UseDevelopmentStorage=true";
+akkaOptions.Discovery.ConnectionString = azureTablesConnectionString;
+akkaOptions.Discovery.HostName = akkaOptions.Management.HostName ?? "localhost";
+akkaOptions.Discovery.Port = akkaOptions.Management.Port ?? akkaOptions.Management.BindPort;
+
+// Configure OpenTelemetry
+var serviceName = "AkkaApp";
+var serviceVersion = "1.0.0";
+
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource
+        .AddService(serviceName: serviceName, serviceVersion: serviceVersion)
+        .AddAttributes(new Dictionary<string, object>
+        {
+            ["deployment.environment"] = builder.Environment.EnvironmentName
+        }))
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation(options =>
+        {
+            options.Filter = context =>
+                !context.Request.Path.StartsWithSegments("/metrics");
+        })
+        .AddHttpClientInstrumentation()
+        .AddSource(serviceName))
+    .WithMetrics(metrics => metrics
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation()
+        .AddRuntimeInstrumentation()
+        .AddPrometheusExporter());
+
+// Configure OTLP exporter if endpoint is set
+var otlpEndpoint = builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
+if (!string.IsNullOrEmpty(otlpEndpoint))
 {
+    builder.Services.AddOpenTelemetry()
+        .WithTracing(tracing => tracing.AddOtlpExporter(options =>
+        {
+            options.Endpoint = new Uri(otlpEndpoint);
+            options.Protocol = OtlpExportProtocol.Grpc;
+        }))
+        .WithMetrics(metrics => metrics.AddOtlpExporter(options =>
+        {
+            options.Endpoint = new Uri(otlpEndpoint);
+            options.Protocol = OtlpExportProtocol.Grpc;
+        }));
+
+    builder.Logging.AddOpenTelemetry(logging =>
+    {
+        logging.IncludeFormattedMessage = true;
+        logging.IncludeScopes = true;
+        logging.AddOtlpExporter(options =>
+        {
+            options.Endpoint = new Uri(otlpEndpoint);
+            options.Protocol = OtlpExportProtocol.Grpc;
+        });
+    });
+}
+
+// Service discovery for Aspire
+builder.Services.AddServiceDiscovery();
+
+// ThreadPool monitor runs on dedicated thread to detect starvation even when ThreadPool is starved
+builder.Services.AddHostedService<ThreadPoolMonitorService>();
+
+// Configure Akka.NET with Cluster
+builder.Services.AddAkka("ThreadPoolDemo", (configurationBuilder, sp) =>
+{
+    configurationBuilder
+        .ConfigureLoggers(logger =>
+        {
+            logger.ClearLoggers();
+            logger.AddLoggerFactory();
+        })
+        .WithRemoting(akkaOptions.Remote)
+        .WithClustering(akkaOptions.Cluster)
+        .WithAkkaManagement(akkaOptions.Management)
+        .WithAzureDiscovery(akkaOptions.Discovery)
+        .WithClusterBootstrap(akkaOptions.ClusterBootstrap);
+
     configurationBuilder
         .WithActors((system, registry, resolver) =>
         {
@@ -21,80 +116,107 @@ builder.Services.AddAkka("OrderSystem", (configurationBuilder, sp) =>
             var slowService = system.ActorOf(Props.Create<SlowServiceActor>(), "slow-service");
             registry.Register<SlowServiceActor>(slowService);
 
-            // Create a pool of blocking order processors
-            // More actors = more ThreadPool threads blocked simultaneously
-            for (int i = 0; i < 20; i++)
-            {
-                var orderActor = system.ActorOf(
-                    Props.Create(() => new BlockingOrderActor(slowService)),
-                    $"order-processor-{i}");
+            // Create a group of blocking order processors
+            // More actors than max threads = guaranteed ThreadPool starvation
+            var actors = Enumerable.Range(1, blockingActorCount)
+                .Select(i => system.ActorOf(Props.Create(() => new BlockingOrderActor(slowService)), $"order-processor-{i}"))
+                .Select(act => act.Path.ToString())
+                .ToArray();
 
-                if (i == 0)
-                    registry.Register<BlockingOrderActor>(orderActor);
-            }
+            var orderRouter = system.ActorOf(
+                Props.Empty.WithRouter(new RoundRobinGroup(actors)),
+                "order-processor-router");
+            registry.Register<BlockingOrderActor>(orderRouter);
         });
 });
 
-var host = builder.Build();
+var app = builder.Build();
 
-// Start the host in the background
-await host.StartAsync();
+// Prometheus metrics endpoint
+app.MapPrometheusScrapingEndpoint();
 
-Console.WriteLine("=== Akka.NET Sync-Over-Async Deadlock Demo ===");
-Console.WriteLine("This app will demonstrate thread pool starvation.");
-Console.WriteLine("Use 'dotnet-monitor' to observe thread pool exhaustion.");
-Console.WriteLine();
-Console.WriteLine("Press ENTER to start sending orders (this will cause thread starvation)...");
-Console.ReadLine();
+// Get Akka system and cluster
+var system = app.Services.GetRequiredService<ActorSystem>();
+var cluster = Cluster.Get(system);
 
-// Get the actor system to send messages
-var actorRegistry = host.Services.GetRequiredService<ActorRegistry>();
-var system = host.Services.GetRequiredService<ActorSystem>();
-
-// Continuously flood the system with concurrent order requests
-Console.WriteLine("Sending continuous waves of 50 concurrent orders...");
-Console.WriteLine("ThreadPool max: 16 threads. Each order blocks a thread for 500-750ms.");
-Console.WriteLine("Press Ctrl+C to stop.");
-Console.WriteLine();
-
-int wave = 0;
-var cts = new CancellationTokenSource();
-Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
-
-while (!cts.Token.IsCancellationRequested)
+// Status endpoint
+app.MapGet("/", () => new
 {
-    wave++;
-    var tasks = new List<Task<OrderResult>>();
-    for (int i = 0; i < 50; i++)
+    Status = "Running",
+    Node = cluster.SelfAddress.ToString(),
+    ClusterStatus = cluster.SelfMember.Status.ToString(),
+    Roles = cluster.SelfMember.Roles,
+    ProcessorCount = Environment.ProcessorCount,
+    MaxThreads = maxThreads,
+    BlockingActors = blockingActorCount,
+    Description = "Worker node with blocking actors - causes ThreadPool starvation"
+});
+
+// Cluster info endpoint
+app.MapGet("/cluster", () =>
+{
+    var members = cluster.State.Members
+        .Select(m => new { Address = m.Address.ToString(), Status = m.Status.ToString(), Roles = m.Roles })
+        .ToList();
+    return new
     {
-        var orderId = (wave * 50) + i;
-        var orderActor = system.ActorSelection($"/user/order-processor-{orderId % 20}");
-        var task = orderActor.Ask<OrderResult>(new ProcessOrder(orderId), TimeSpan.FromSeconds(30));
-        tasks.Add(task);
+        Self = cluster.SelfAddress.ToString(),
+        Leader = cluster.State.Leader?.ToString(),
+        Members = members
+    };
+});
+
+// Endpoint to trigger load (sends orders to router) - fire and forget
+app.MapGet("/trigger", (IActorRegistry registry, int? count) =>
+{
+    var router = registry.Get<BlockingOrderActor>();
+    var orderCount = count ?? blockingActorCount * 2;
+
+    // Fire and forget - use Tell instead of Ask to avoid blocking this endpoint
+    for (var i = 0; i < orderCount; i++)
+    {
+        router.Tell(new ProcessOrder(i));
     }
 
-    try
+    return Results.Ok(new
     {
-        await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(30), cts.Token);
-        var completed = tasks.Count(t => t.IsCompletedSuccessfully);
-        var faulted = tasks.Count(t => t.IsFaulted);
-        Console.WriteLine($"[Wave {wave}] Completed: {completed}, Faulted: {faulted}");
-    }
-    catch (OperationCanceledException)
-    {
-        break;
-    }
-    catch (TimeoutException)
-    {
-        var completed = tasks.Count(t => t.IsCompletedSuccessfully);
-        var pending = tasks.Count(t => !t.IsCompleted);
-        Console.WriteLine($"[Wave {wave}] STARVATION! Completed: {completed}, Still pending: {pending}");
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"[Wave {wave}] Error: {ex.GetBaseException().Message}");
-    }
-}
+        OrdersSent = orderCount,
+        Message = "Orders dispatched to blocking actors. Check /threadpool to observe starvation."
+    });
+});
 
-Console.WriteLine("Shutting down...");
-await host.StopAsync();
+// ThreadPool status endpoint
+app.MapGet("/threadpool", () =>
+{
+    ThreadPool.GetAvailableThreads(out var workerAvailable, out var ioAvailable);
+    ThreadPool.GetMaxThreads(out var workerMax, out var ioMax);
+    ThreadPool.GetMinThreads(out var workerMin, out var ioMin);
+
+    return new
+    {
+        Workers = new { Available = workerAvailable, Max = workerMax, Min = workerMin, InUse = workerMax - workerAvailable },
+        IO = new { Available = ioAvailable, Max = ioMax, Min = ioMin, InUse = ioMax - ioAvailable }
+    };
+});
+
+// Manual capture endpoint - triggers dotnet-monitor's ManualCapture collection rule
+// dotnet-monitor listens for requests to this path and collects stack traces
+app.MapGet("/capture-stacks", () => Results.Ok(new
+{
+    Message = "Stack capture triggered. Check C:\\tmp\\dotnet-monitor\\artifacts for output.",
+    Timestamp = DateTime.UtcNow
+}));
+
+// Log startup info
+var logger = app.Services.GetRequiredService<ILogger<Program>>();
+logger.LogInformation("=== AkkaApp - Worker Node with Blocking Actors ===");
+logger.LogInformation("Cluster node: {Address}", cluster.SelfAddress);
+logger.LogInformation("Roles: {Roles}", string.Join(", ", cluster.SelfMember.Roles));
+logger.LogInformation("Processor count: {Count}", Environment.ProcessorCount);
+logger.LogInformation("ThreadPool max threads: {Max}", maxThreads);
+logger.LogInformation("Blocking actors: {Count}", blockingActorCount);
+logger.LogInformation("Blocking actors use sync-over-async (.Result) causing ThreadPool starvation");
+logger.LogInformation("When starved, cluster heartbeats will fail and nodes may be marked unreachable");
+logger.LogInformation("Endpoints: GET /, GET /cluster, GET /threadpool, GET /trigger?count=N, GET /capture-stacks");
+
+await app.RunAsync();

@@ -3,22 +3,8 @@
     "ConnectionMode": "Listen",
     "EndpointName": "dotnet-monitor-pipe"
   },
-  "DefaultProcess": {
-    "Filters": [{
-      "ProcessName": "fieldservice"
-    }]
-  },
   "Storage": {
     "DefaultSharedPath": "C:\\tmp\\dotnet-monitor"
-  },
-  "InProcessFeatures": {
-    "Enabled": true,
-    "CallStacks": {
-      "Enabled": true
-    },
-    "Exceptions": {
-      "Enabled": true
-    }
   },
   "Egress": {
     "FileSystem": {
@@ -29,43 +15,22 @@
     }
   },
   "CollectionRules": {
-    "EarlyStarvationWarning": {
+    "ThreadPoolStarvation": {
       "Trigger": {
         "Type": "EventCounter",
         "Settings": {
           "ProviderName": "System.Runtime",
-          "CounterName": "threadpool-queue-length",
-          "GreaterThan": 100,
-          "SlidingWindowDuration": "00:00:10"
+          "CounterName": "threadpool-completed-items-count",
+          "LessThan": 1,
+          "SlidingWindowDuration": "00:00:02"
         }
       },
       "Actions": [
         {
-          "Type": "CollectStacks",
+          "Type": "CollectTrace",
           "Settings": {
-            "Egress": "artifacts"
-          }
-        }
-      ],
-      "Limits": {
-        "ActionCount": 3,
-        "ActionCountSlidingWindowDuration": "00:10:00"
-      }
-    },
-    "CriticalStarvation": {
-      "Trigger": {
-        "Type": "EventCounter",
-        "Settings": {
-          "ProviderName": "System.Runtime",
-          "CounterName": "threadpool-queue-length",
-          "GreaterThan": 500,
-          "SlidingWindowDuration": "00:00:15"
-        }
-      },
-      "Actions": [
-        {
-          "Type": "CollectStacks",
-          "Settings": {
+            "Profile": "Cpu",
+            "Duration": "00:00:10",
             "Egress": "artifacts"
           }
         },
@@ -78,23 +43,56 @@
         }
       ],
       "Limits": {
-        "ActionCount": 1,
-        "ActionCountSlidingWindowDuration": "01:00:00"
+        "ActionCount": 3,
+        "ActionCountSlidingWindowDuration": "00:10:00"
       }
     },
-    "TimerBacklogDetection": {
+    "HighLockContention": {
       "Trigger": {
         "Type": "EventCounter",
         "Settings": {
           "ProviderName": "System.Runtime",
-          "CounterName": "active-timer-count",
-          "GreaterThan": 50,
-          "SlidingWindowDuration": "00:00:10"
+          "CounterName": "monitor-lock-contention-count",
+          "GreaterThan": 100,
+          "SlidingWindowDuration": "00:00:03"
         }
       },
       "Actions": [
         {
-          "Type": "CollectStacks",
+          "Type": "CollectTrace",
+          "Settings": {
+            "Profile": "Cpu",
+            "Duration": "00:00:10",
+            "Egress": "artifacts"
+          }
+        }
+      ],
+      "Limits": {
+        "ActionCount": 3,
+        "ActionCountSlidingWindowDuration": "00:10:00"
+      }
+    },
+    "GCPressure": {
+      "Trigger": {
+        "Type": "EventCounter",
+        "Settings": {
+          "ProviderName": "System.Runtime",
+          "CounterName": "time-in-gc",
+          "GreaterThan": 50,
+          "SlidingWindowDuration": "00:00:05"
+        }
+      },
+      "Actions": [
+        {
+          "Type": "CollectTrace",
+          "Settings": {
+            "Profile": "Cpu",
+            "Duration": "00:00:10",
+            "Egress": "artifacts"
+          }
+        },
+        {
+          "Type": "CollectGCDump",
           "Settings": {
             "Egress": "artifacts"
           }
@@ -102,23 +100,32 @@
       ],
       "Limits": {
         "ActionCount": 2,
-        "ActionCountSlidingWindowDuration": "00:30:00"
+        "ActionCountSlidingWindowDuration": "00:10:00"
       }
     },
-    "ThreadPoolGrowthSpiral": {
+    "ThreadExplosion": {
       "Trigger": {
         "Type": "EventCounter",
         "Settings": {
           "ProviderName": "System.Runtime",
           "CounterName": "threadpool-thread-count",
           "GreaterThan": 100,
-          "SlidingWindowDuration": "00:00:15"
+          "SlidingWindowDuration": "00:00:05"
         }
       },
       "Actions": [
         {
-          "Type": "CollectStacks",
+          "Type": "CollectTrace",
           "Settings": {
+            "Profile": "Cpu",
+            "Duration": "00:00:10",
+            "Egress": "artifacts"
+          }
+        },
+        {
+          "Type": "CollectDump",
+          "Settings": {
+            "Type": "Full",
             "Egress": "artifacts"
           }
         }
@@ -126,6 +133,24 @@
       "Limits": {
         "ActionCount": 2,
         "ActionCountSlidingWindowDuration": "00:30:00"
+      }
+    },
+    "Startup": {
+      "Trigger": {
+        "Type": "Startup"
+      },
+      "Actions": [
+        {
+          "Type": "CollectTrace",
+          "Settings": {
+            "Profile": "Cpu",
+            "Duration": "00:00:05",
+            "Egress": "artifacts"
+          }
+        }
+      ],
+      "Limits": {
+        "ActionCount": 1
       }
     }
   }
