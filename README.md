@@ -1,5 +1,12 @@
 # Akka.NET ThreadPool Starvation Demo
 
+> [!NOTE]
+> This isn't working as intended yet, it is really hard to tune dotnet-monitor to do a hands-off automated data 
+> collection at the exact time it is needed. 
+> 
+> Your mileage may vary, dotnet-monitor might work, or it may not, you can't really know for sure until the failure 
+> event occured because the pattern of each failure can vary for each event.
+
 This project demonstrates how ThreadPool starvation caused by sync-over-async blocking patterns affects Akka.NET cluster health. It uses .NET Aspire for orchestration with a full observability stack (Seq, Prometheus, Grafana) and **dotnet-monitor for automated diagnostic capture**.
 
 ## The Problem
